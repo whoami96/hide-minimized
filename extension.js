@@ -1,96 +1,122 @@
-import { Workspace } from 'resource:///org/gnome/shell/ui/workspace.js'
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
+import { Workspace } from 'resource:///org/gnome/shell/ui/workspace.js';
 import {
   GroupCyclerPopup,
   WindowCyclerPopup,
   WindowSwitcherPopup,
-} from 'resource:///org/gnome/shell/ui/altTab.js'
-
-// import { UIWindowSelector, UIWindowSelectorWindow } from 'resource:///org/gnome/shell/ui/screenshot.js'
-// import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+} from 'resource:///org/gnome/shell/ui/altTab.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const isOverviewWindow = Workspace.prototype._isOverviewWindow;
+const origDoAddWindow = Workspace.prototype._doAddWindow;
 const groupGetWindows = GroupCyclerPopup.prototype._getWindows;
 const windowGetWindows = WindowCyclerPopup.prototype._getWindows;
 const windowSwitcherWindows = WindowSwitcherPopup.prototype._getWindowList;
 
-// const capture = UIWindowSelector.prototype.capture;
-
-
 function _filterWindows(windows) {
-  return windows.filter((w, i, a) => !w.minimized);
+  return windows.filter(w => !w.minimized);
 }
 
-
-export default class HideMinimized {
-  constructor() {
+function _getWorkspaces() {
+  const workspaces = [];
+  const views = Main.overview._overview?._controls?._workspacesDisplay?._workspacesViews ?? [];
+  for (const view of views) {
+    if (view._workspaces)
+      workspaces.push(...view._workspaces);
+    if (view._workspace)
+      workspaces.push(view._workspace);
+    if (view._workspacesView) {
+      if (view._workspacesView._workspaces)
+        workspaces.push(...view._workspacesView._workspaces);
+      if (view._workspacesView._workspace)
+        workspaces.push(view._workspacesView._workspace);
+    }
   }
+  return workspaces;
+}
 
+export default class HideMinimized extends Extension {
   enable() {
-    Workspace.prototype._isOverviewWindow = (win) => {
-      const show = isOverviewWindow(win);
-      let meta = win;
-      if (win.get_meta_window)
-        meta = win.get_meta_window()
+    Workspace.prototype._isOverviewWindow = function (win) {
+      const show = isOverviewWindow.call(this, win);
+      const meta = win.get_meta_window ? win.get_meta_window() : win;
       return show && !meta.minimized;
     };
 
-    WindowCyclerPopup.prototype._getWindows = function() {
-      return _filterWindows(windowGetWindows.bind(this)());
+    Workspace.prototype._doAddWindow = function (metaWin) {
+      if (!this._minimizedWindows)
+        this._minimizedWindows = new Set();
+
+      if (!this._minimizedWindows.has(metaWin)) {
+        metaWin.connectObject('notify::minimized', () => {
+          if (metaWin.minimized)
+            this._doRemoveWindow(metaWin);
+          else
+            this._doAddWindow(metaWin);
+        }, this);
+        this._minimizedWindows.add(metaWin);
+      }
+
+      return origDoAddWindow.call(this, metaWin);
     };
 
-    GroupCyclerPopup.prototype._getWindows = function() {
-      return _filterWindows(groupGetWindows.bind(this)());
+    WindowCyclerPopup.prototype._getWindows = function () {
+      return _filterWindows(windowGetWindows.call(this));
     };
 
-    WindowSwitcherPopup.prototype._getWindowList = function() {
-      return _filterWindows(windowSwitcherWindows.bind(this)());
+    GroupCyclerPopup.prototype._getWindows = function () {
+      return _filterWindows(groupGetWindows.call(this));
     };
 
-    /*
-    // Patched version of original function from:
-    // https://gitlab.gnome.org/GNOME/gnome-shell/-/blob/main/js/ui/screenshot.js
-    UIWindowSelector.prototype.capture = function() {
+    WindowSwitcherPopup.prototype._getWindowList = function () {
+      return _filterWindows(windowSwitcherWindows.call(this));
+    };
+
+    // Apply immediately to already existing workspaces and windows
+    for (const ws of _getWorkspaces()) {
+      if (!ws._minimizedWindows)
+        ws._minimizedWindows = new Set();
+
       for (const actor of global.get_window_actors()) {
-        let window = actor.metaWindow;
-        let workspaceManager = global.workspace_manager;
-        let activeWorkspace = workspaceManager.get_active_workspace();
-        if (window.is_override_redirect() ||
-            !window.located_on_workspace(activeWorkspace) ||
-            window.get_monitor() !== this._monitorIndex ||
-            window.minimized)
-            continue;
+        const metaWin = actor.meta_window;
+        if (!metaWin)
+          continue;
 
-        const widget = new UIWindowSelectorWindow(
-            actor,
-            {
-                style_class: 'screenshot-ui-window-selector-window',
-                reactive: true,
-                can_focus: true,
-                toggle_mode: true,
-            }
-        );
-
-        widget.connect('key-focus-in', win => {
-            Main.screenshotUI.grab_key_focus();
-            win.checked = true;
-        });
-
-        if (window.has_focus()) {
-            widget.checked = true;
-            widget.toggle_mode = false;
+        if (!ws._minimizedWindows.has(metaWin)) {
+          metaWin.connectObject('notify::minimized', () => {
+            if (metaWin.minimized)
+              ws._doRemoveWindow(metaWin);
+            else
+              ws._doAddWindow(metaWin);
+          }, ws);
+          ws._minimizedWindows.add(metaWin);
         }
 
-        this._layoutManager.addWindow(widget);
+        if (metaWin.minimized)
+          ws._doRemoveWindow(metaWin);
       }
-    };
-    */
+    }
   }
 
   disable() {
     Workspace.prototype._isOverviewWindow = isOverviewWindow;
+    Workspace.prototype._doAddWindow = origDoAddWindow;
     WindowCyclerPopup.prototype._getWindows = windowGetWindows;
     GroupCyclerPopup.prototype._getWindows = groupGetWindows;
     WindowSwitcherPopup.prototype._getWindowList = windowSwitcherWindows;
-    // UIWindowSelector.prototype.capture = capture;
+
+    for (const ws of _getWorkspaces()) {
+      for (const actor of global.get_window_actors()) {
+        const metaWin = actor.meta_window;
+        if (!metaWin)
+          continue;
+
+        metaWin.disconnectObject(ws);
+
+        if (metaWin.minimized)
+          ws._doAddWindow(metaWin);
+      }
+      delete ws._minimizedWindows;
+    }
   }
 }
